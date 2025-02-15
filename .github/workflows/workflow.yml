@@ -1,0 +1,148 @@
+name: PHP Composer
+
+on:
+  push:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: laravel_test
+          MYSQL_USER: laravel
+          MYSQL_PASSWORD: password
+        options: --health-cmd="mysqladmin ping --silent" --health-interval=10s --health-timeout=5s --health-retries=3
+        ports:
+          - 3306:3306
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      - name: Validate composer.json and composer.lock
+        run: php composer.phar validate
+
+      - name: Cache Composer packages
+        id: composer-cache
+        uses: actions/cache@v3
+        with:
+          path: vendor
+          key: ${{ runner.os }}-php-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-php-
+
+      - name: Install dependencies
+        run: php composer.phar install --prefer-dist --no-progress && php composer.phar update && php composer.phar dump-autoload
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '22'
+
+      - name: Cache NPM modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install NPM dependencies
+        run: npm install
+
+      - name: Build assets
+        run: npm run build
+
+      - name: Configure .env
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          echo "DB_CONNECTION=mysql" >> .env
+          echo "DB_HOST=127.0.0.1" >> .env
+          echo "DB_PORT=3306" >> .env
+          echo "DB_DATABASE=laravel_test" >> .env
+          echo "DB_USERNAME=laravel" >> .env
+          echo "DB_PASSWORD=password" >> .env
+
+      - name: Run Laravel Migrations
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: laravel_test
+          DB_USERNAME: laravel
+          DB_PASSWORD: password
+        run: |
+          php artisan migrate --force --seed
+          php artisan migrate:status
+          php artisan clear-compiled
+          php artisan config:clear
+          php artisan config:cache
+          php artisan event:clear
+          php artisan event:cache
+          php artisan view:clear
+          php artisan view:cache
+          php artisan filament:clear-cached-components
+          php artisan filament:cache-components
+          php artisan optimize:clear
+
+      - name: Set up SSH key and deploy via SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          # Configurações SSH para o deploy
+          eval "$(ssh-agent -s)"
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-add ~/.ssh/id_rsa
+          ssh-keyscan -p ${{ secrets.SSH_PRIVATE_PORT }} ${{ secrets.SSH_PRIVATE_HOST }} >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          # Determina o diretório de destino com base na branch
+          if [[ "${{ github.ref }}" == "refs/heads/production" ]]; then
+            DEPLOY_DIR="${{ secrets.SSH_PRIVATE_PATH_PRODUCTION }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/stage" ]]; then
+            DEPLOY_DIR="${{ secrets.SSH_PRIVATE_PATH }}"
+          fi
+
+          # Transferência de arquivos para o servidor remoto
+          rsync -avz -e "ssh -p ${{ secrets.SSH_PRIVATE_PORT }}" --delete \
+            --exclude 'node_modules' --exclude '.git' --exclude '.env' --exclude '.htaccess' ./ \
+            ${{ secrets.SSH_PRIVATE_USER }}@${{ secrets.SSH_PRIVATE_HOST }}:$DEPLOY_DIR
+
+          # Executa comandos no servidor remoto
+          ssh -p ${{ secrets.SSH_PRIVATE_PORT }} ${{ secrets.SSH_PRIVATE_USER }}@${{ secrets.SSH_PRIVATE_HOST }} << EOF
+            DEPLOY_DIR="${{ secrets.SSH_PRIVATE_PATH }}"
+            echo "Verificando conteúdo do diretório ${DEPLOY_DIR}..."
+            ls -la "${DEPLOY_DIR}"
+            cd "${DEPLOY_DIR}" || exit 1
+
+            if [ ! -f artisan ]; then
+              echo "Arquivo artisan não encontrado no diretório ${DEPLOY_DIR}. Verifique a transferência de arquivos."
+              exit 1
+            fi
+
+            # Executando comandos do Laravel
+            echo "Executando comandos Laravel..."
+            php artisan migrate --force --seed
+            php artisan config:clear
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:clear
+            php artisan view:cache
+            php artisan event:clear
+            php artisan event:cache
+          EOF
