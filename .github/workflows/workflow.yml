@@ -119,12 +119,13 @@ jobs:
           fi
 
           # Transferência de arquivos para o servidor remoto
-          rsync -avz -e "ssh -p ${{ secrets.SSH_PRIVATE_PORT }}" --delete \
+          rsync -avz -e "ssh -p ${{ secrets.SSH_PRIVATE_PORT }} -o IdentitiesOnly=yes -i ~/.ssh/id_rsa" --delete \
             --exclude 'node_modules' --exclude '.git' --exclude '.env' --exclude '.htaccess' ./ \
             ${{ secrets.SSH_PRIVATE_USER }}@${{ secrets.SSH_PRIVATE_HOST }}:$DEPLOY_DIR
 
           # Executa comandos no servidor remoto
-          ssh -p ${{ secrets.SSH_PRIVATE_PORT }} ${{ secrets.SSH_PRIVATE_USER }}@${{ secrets.SSH_PRIVATE_HOST }} << EOF
+          ssh -p ${{ secrets.SSH_PRIVATE_PORT }} -o IdentitiesOnly=yes -i ~/.ssh/id_rsa \
+            ${{ secrets.SSH_PRIVATE_USER }}@${{ secrets.SSH_PRIVATE_HOST }} << EOF
             DEPLOY_DIR="${{ secrets.SSH_PRIVATE_PATH }}"
             echo "Verificando conteúdo do diretório ${DEPLOY_DIR}..."
             ls -la "${DEPLOY_DIR}"
